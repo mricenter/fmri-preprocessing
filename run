@@ -1,24 +1,30 @@
 #! /bin/bash
-#
-# Run dtiinit Gear
+# Long Qian, Peking University
+# Email:longqianad@pku.edu.cn
+
+# Run functional-preprocessing Gear
 # Built to flywheel-v0 spec.
 #
-CONTAINER="[scitran/dtiinit]"
+CONTAINER="[mricenter/functional-preprocessing]"
 echo -e "$CONTAINER  Initiated"
+set -e
 
 # Configure the ENV
 export FSLOUTPUTTYPE=NIFTI_GZ
-export LD_LIBRARY_PATH=/opt/mcr/v82/runtime/glnxa64:/opt/mcr/v82/bin/glnxa64:/opt/mcr/v82/sys/os/glnxa64:/opt/mcr/v82/sys/java/jre/glnxa64/jre/lib/amd64/native_threads:/opt/mcr/v82/sys/java/jre/glnxa64/jre/lib/amd64/server:/opt/mcr/v82/sys/java/jre/glnxa64/jre/lib/amd64:$LD_LIBRARY_PATH
-export XAPPLRESDIR=/opt/mcr/v82/X11/app-defaults
+
 
 # Configure paths
 FLYWHEEL_BASE=/flywheel/v0
 OUTPUT_DIR=$FLYWHEEL_BASE/output
 INPUT_DIR=$FLYWHEEL_BASE/input
-NIFTI_DIR=$INPUT_DIR/nifti
-BVEC_DIR=$INPUT_DIR/bvec
-BVAL_DIR=$INPUT_DIR/bval
 WORK_DIR=$INPUT_DIR/work
+
+CONFIG_FILE=$FLYWHEEL_BASE/manifest.json
+
+TR=$(jq <$CONFIG_FILE -r '.config.TR')
+MIDSLICE=$(jq <$CONFIG_FILE -r '.config.MIDSLICE')  
+ACQ=$(jq <$CONFIG_FILE -r '.config.ACQ')
+
 
 # Ensure there is an output directory
 if [[ ! -d "$OUTPUT_DIR" ]]
@@ -30,35 +36,162 @@ fi
 # Make the directories
 mkdir $WORK_DIR
 
-# Convert the config json to a dtiinit_params json file
-$FLYWHEEL_BASE/parse_config.py \
-    --input_file ${FLYWHEEL_BASE}/config.json \
-    --output_file ${WORK_DIR}/dtiInit-params.json \
-    --input_dir ${WORK_DIR} \
-    --output_dir ${OUTPUT_DIR} \
-    --bvec_dir ${BVEC_DIR} \
-    --bval_dir ${BVAL_DIR} \
-    --nifti_dir ${NIFTI_DIR}
 
-# Make sure the params file is saved with the output
-cp ${WORK_DIR}/dtiInit-params.json ${OUTPUT_DIR}
+####################You shold change this path############
 
-# Execute the algorithm
-/usr/local/bin/dtiInit $WORK_DIR 2>&1 | tee $OUTPUT_DIR/dtiInit-log.txt
+TEMPLATE_1mm=/tmp/ch2_1mm.nii
+TEMPLATE_2mm=/tmp/T1_bet_2mm.nii
+TEMPLATE_3mm=/tmp/T1_3mm.nii
 
-# Get a list of the files in the output directory
-outputs=$(find $OUTPUT_DIR/* -maxdepth 0 -type f)
+#################################
 
-# If outputs exist, generate metadata, and exit
-if [[ -z $outputs ]]
-    then
-        echo "$CONTAINER  No results found in output directory... Exiting"
-        exit 1
-    else
-        cd $OUTPUT_DIR
-        $FLYWHEEL_BASE/metadata_create.py $OUTPUT_DIR $CONTAINER
-        echo -e "$CONTAINER  Wrote: `ls`"
-        echo -e "$CONTAINER  Done!"
-fi
+t1_file=t1_anat.nii.gz
 
-exit 0
+# reorient T1
+3dcopy  $INPUT_DIR/structural/* $OUTPUT_DIR/rm_${t1_file}
+
+3drefit -deoblique $OUTPUT_DIR/rm_${t1_file}
+
+3dresample -orient RPI -prefix $OUTPUT_DIR/${t1_file} -inset $OUTPUT_DIR/rm_${t1_file}
+
+# bet skull
+ss_t1_file=ss${t1_file}
+bet $OUTPUT_DIR/${t1_file} $OUTPUT_DIR/ss${t1_file} -F -f 0.25 -g 0
+
+# use flirt to normalize T1 to template
+warp_file=t1_template.nii.gz
+flirt -in $OUTPUT_DIR/${ss_t1_file} -ref ${TEMPLATE_2mm} -omat $OUTPUT_DIR/rm_affine_transf.mat
+fnirt --in=$OUTPUT_DIR/${t1_file} --aff=$OUTPUT_DIR/rm_affine_transf.mat \
+      --cout=$OUTPUT_DIR/t1_template --config=T1_2_MNI152_2mm.cnf
+   
+   
+norm_t1_file=w${t1_file}
+applywarp --ref=${TEMPLATE_1mm} --in=$OUTPUT_DIR/${t1_file} \
+          --warp=$OUTPUT_DIR/t1_template --out=$OUTPUT_DIR/${norm_t1_file}
+
+norm_ss_t1_file=w${ss_t1_file}
+applywarp --ref=${TEMPLATE_1mm} --in=$OUTPUT_DIR/${ss_t1_file} \
+          --warp=$OUTPUT_DIR/t1_template --out=$OUTPUT_DIR/${norm_ss_t1_file}
+
+## create csf and wm masks in template space
+csf_mask=w${ss_t1_file%%.nii.gz}_csf.nii.gz
+wm_mask=w${ss_t1_file%%.nii.gz}_wm.nii.gz
+gm_mask=sw${ss_t1_file%%.nii.gz}_gm.nii.gz
+   
+in_csf_file=rm_${ss_t1_file%%.nii.gz}_pve_0.nii.gz 
+in_wm_file=rm_${ss_t1_file%%.nii.gz}_pve_2.nii.gz
+in_gm_file=rm_${ss_t1_file%%.nii.gz}_pve_1.nii.gz
+   
+fast --channels=1 --type=1 --class=3 --out=$OUTPUT_DIR/rm_${ss_t1_file} $OUTPUT_DIR/${ss_t1_file}
+   
+   
+# create csf mask in template space 
+   
+applywarp --ref=${TEMPLATE_1mm} --in=$OUTPUT_DIR/${in_csf_file} \
+          --warp=$OUTPUT_DIR/t1_template --out=$OUTPUT_DIR/rm_w${in_csf_file##rm_}
+3dcalc -a $OUTPUT_DIR/rm_w${in_csf_file##rm_} -expr 'step(a-.99)' -prefix $OUTPUT_DIR/${csf_mask} -datum short
+   
+   
+# create white matter mask in template space    
+   
+applywarp --ref=${TEMPLATE_1mm} --in=$OUTPUT_DIR/${in_wm_file} \
+          --warp=$OUTPUT_DIR/t1_template --out=$OUTPUT_DIR/rm_w${in_wm_file##rm_}
+3dcalc -a $OUTPUT_DIR/rm_w${in_wm_file##rm_} -expr 'step(a-.99)' -prefix $OUTPUT_DIR/${wm_mask} -datum short
+   
+   
+# gray matter mask in norm space
+   
+applywarp --ref=${TEMPLATE_1mm} --in=$OUTPUT_DIR/${in_gm_file} \
+          --warp=$OUTPUT_DIR/t1_template --out=$OUTPUT_DIR/${gm_mask##s}
+3dmerge -1blur_fwhm 6 -doall -prefix $OUTPUT_DIR/${gm_mask} $OUTPUT_DIR/${gm_mask##s}
+
+   
+#----- BASIC resting-state fMRI preprocessing
+
+subname_rest=rest_fmri 
+bold_file=rest_fmri.nii.gz
+orig_bold=rm_nmrda${bold_file}
+mni_preproc_bold_data=snwmrda${bold_file}
+norm_filtered_denoised_bold=sfnwmrda${bold_file}
+epi_mean_template=mean_mrda${bold_file}
+mni_mask_file=mask_w${epi_mean_template}
+   
+# coregister all EPI data to the first image of REST1
+coreg_base=rm_da${bold_file}'[0]'
+   
+# remove first 10 images 
+#--------------------------------------------#####
+
+FUN_DIR=$INPUT_DIR/functional
+sub_rest='find ${FUN_DIR}/* -name "*.nii*"'
+
+3dcalc -prefix $OUTPUT_DIR/rm_${bold_file} -a ${sub_rest}'[1..$]' -expr 'a'
+
+prev_step=$OUTPUT_DIR/rm_${bold_file}
+
+# time shift dataset
+3dTshift -TR ${TR}s -slice ${MIDSLICE} -tpattern ${ACQ} -prefix $OUTPUT_DIR/rm_a${prev_step##rm_} ${prev_step}
+   
+prev_step=$OUTPUT_DIR/rm_a${prev_step##rm_}
+   
+# deoblique dataset, and convert to RPI
+3drefit -deoblique ${prev_step}
+3dresample -orient RPI -prefix $OUTPUT_DIR/rm_d${prev_step##rm_} -inset ${prev_step}
+ 
+prev_step=$OUTPUT_DIR/rm_d${prev_step##rm_}
+   
+# motion correct data
+motion_file=rp_${bold_file%%.nii.gz}.1D
+
+3dvolreg -Fourier -prefix $OUTPUT_DIR/rm_r${prev_step##rm_} -base $OUTPUT_DIR/${coreg_base} \
+         -1Dfile $OUTPUT_DIR/rp_${bold_file%%.nii.gz}.1D ${prev_step}
+
+prev_step1=rm_r${prev_step##rm_}
+prev_step=$OUTPUT_DIR/rm_r${prev_step##rm_}
+   
+# create a mask for the dataset
+mask_file=mask_${prev_step1##rm_}
+
+3dAutomask -prefix $OUTPUT_DIR/mask_${prev_step##rm_} ${prev_step}
+
+# mask the dataset
+3dcalc -a ${prev_step} -b $OUTPUT_DIR/${mask_file} -expr 'ispositive(b)*a' -prefix $OUTPUT_DIR/rm_m${prev_step##rm_}
+
+prev_step=$OUTPUT_DIR/rm_m${prev_step##rm_}
+
+# create an average of this file to use for coregistering to T1 at later stage
+3dTstat -prefix $OUTPUT_DIR/${epi_mean_template} ${prev_step}
+
+#----- Transfrom BOLD data to template space
+epi_mni_xform=${subname_rest}_epi_2_template_3mm
+# calculate the EPI-template transform
+# register coreg_base to anatomical
+flirt -ref $OUTPUT_DIR/${ss_t1_file} -in $OUTPUT_DIR/${epi_mean_template} -dof 7 -omat $OUTPUT_DIR/rm_${subname_rest}_epi_2_T1.mat
+   
+# copy mean template into T1 space for debugging
+flirt -in $OUTPUT_DIR/${epi_mean_template} -ref $OUTPUT_DIR/${ss_t1_file} -out $OUTPUT_DIR/t1_${epi_mean_template} \
+      -init $OUTPUT_DIR/rm_${subname_rest}_epi_2_T1.mat -applyxfm 
+
+# combine xforms
+convertwarp --ref=${TEMPLATE_3mm} --warp1=$OUTPUT_DIR/${warp_file} \
+            --premat=$OUTPUT_DIR/rm_${subname_rest}_epi_2_T1.mat --out=$OUTPUT_DIR/${epi_mni_xform} --relout 
+
+# copy mean image into template space for debugging
+   
+applywarp --ref=${TEMPLATE_3mm} \
+          --in=$OUTPUT_DIR/${epi_mean_template} --warp=$OUTPUT_DIR/${epi_mni_xform} --rel \
+          --out=$OUTPUT_DIR/w${epi_mean_template}
+
+# create mask in template space 
+3dAutomask -prefix $OUTPUT_DIR/${mni_mask_file} $OUTPUT_DIR/w${epi_mean_template}
+   
+# copy data into template space 
+applywarp --ref=${TEMPLATE_3mm} \
+          --in=${prev_step} --warp=$OUTPUT_DIR/${epi_mni_xform} --rel \
+          --out=$OUTPUT_DIR/rm_w${prev_step##rm_}
+
+#prev_step=$OUTPUT_DIR/rm_w${prev_step##rm_}
+
+
+
+

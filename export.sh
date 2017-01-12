@@ -1,11 +1,11 @@
 #!/bin/bash
 # Exports the container in the cwd.
 # The container can be exported once it's started with
-gear=dtiinit
+gear=functional-preprocessing
 version=0.1.2
 outname=$gear-$version.tar
 container=$gear
-image=scitran/$gear
+image=mricenter/$gear
 
 # Check if input was passed in.
 if [[ -n $1 ]]; then
