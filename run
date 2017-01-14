@@ -11,6 +11,25 @@ set -e
 
 # Configure the ENV
 export FSLOUTPUTTYPE=NIFTI_GZ
+# Configure the ENV
+export HOME=/home
+export SOFT=/soft
+export BASHRC=$HOME/.bashrc
+export BASICUSER=basicuser
+export FSLDIR=/usr/share/fsl/5.0
+export FSLOUTPUTTYPE=NIFTI_GZ
+export FSLMULTIFILEQUIT=TRUE
+export POSSUMDIR=/usr/share/fsl/5.0
+export LD_LIBRARY_PATH=/usr/lib/fsl/5.0:$LD_LIBRARY_PATH
+export FSLTCLSH=/usr/bin/tclsh
+export FSLWISH=/usr/bin/wis
+export PATH=/usr/lib/fsl/5.0:$PATH
+export PATH=/usr/lib/afni/bin:$PATH
+export PATH=FSLDIR FSLMULTIFILEQUIT FSLOUTPUTTYPE
+source $BASHRC
+
+	
+
 
 
 # Configure paths
